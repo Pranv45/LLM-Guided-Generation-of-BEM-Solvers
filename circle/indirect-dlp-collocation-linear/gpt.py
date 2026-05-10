@@ -415,11 +415,12 @@ def run_bem(M, n_mode):
 # Main Sweep
 # ============================================================
 
-print("numba acceleration")
+
 if __name__ == "__main__":
     n_mode = 3
     Ms = [1000, 2000, 4000, 8000, 16000]
 
+    print("numba acceleration")
     print(" M      Iter    Setup(s)  Solve(s)  Eval(s)   Total(s)   RelL2       Linf")
     print("-"*80)
 
