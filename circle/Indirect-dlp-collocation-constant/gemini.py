@@ -122,10 +122,11 @@ def run_bem(M, n_freq=2):
     return metrics
 
 if __name__ == "__main__":
-    # Now supports up to 128,000 without MemoryError
+
     M_list = [4000, 8000, 16000, 32000, 64000]
     n_freq = 3
 
+    print("no numba")
     print(f"{'M':>8} | {'Iters':>5} | {'Setup(s)':>8} | {'Solve(s)':>9} | {'Eval(s)':>8} | {'L2 Error':>10}")
     print("-" * 75)
 
@@ -313,6 +314,7 @@ def run_bem(M: int, n: int = 3,
 
 M_values = [4_000, 8_000, 16_000, 32_000, 64_000]
 
+print("numba")
 HDR = (f"{'M':>8}  {'Iters':>5}  {'Setup(s)':>9}  {'Solve(s)':>9}  "
        f"{'Eval(s)':>8}  {'Total(s)':>9}  {'Rel L2':>10}  {'Linf':>10}")
 print(HDR)
