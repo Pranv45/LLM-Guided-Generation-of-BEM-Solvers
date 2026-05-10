@@ -1,3 +1,4 @@
+# no numba
 import time
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, gmres
@@ -232,6 +233,7 @@ def run_case(m, eval_pts, u_exact):
 # ---------------------------------------------------------------------
 def main():
     eval_pts, u_exact = build_interior_grid()
+    print("no numba")
 
     print(
         f"{'M':>8} {'GMRES':>8} {'Rel L2 Error':>16} {'Linf Error':>16} "
@@ -250,6 +252,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 #numba
 import numpy as np
@@ -475,6 +478,7 @@ if __name__ == "__main__":
     n_mode = 3
     Ms = [1000, 2000, 4000, 8000, 16000]
 
+    print("numba")
     print(" M      Iter    Setup(s)  Solve(s)  Eval(s)   Total(s)   RelL2       Linf")
     print("-"*80)
 
