@@ -1,0 +1,224 @@
+import numpy as np
+import time
+from scipy.sparse.linalg import LinearOperator, gmres
+from numba import njit, prange
+
+@njit(cache=True)
+def get_gauss_points():
+    pts = np.array([-0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
+                     0.1834346424956498,  0.5255324099163290,  0.7966664774136267,  0.9602898564975363])
+    wts = np.array([ 0.1012285362903763,  0.2223810344533745,  0.3137066458778873,  0.3626837833783620,
+                     0.3626837833783620,  0.3137066458778873,  0.2223810344533745,  0.1012285362903763])
+    return pts, wts
+
+@njit(cache=True)
+def r_func(theta):
+    return 1.0 + 0.3 * np.cos(5.0 * theta)
+
+@njit(cache=True)
+def exact_u(x, y):
+    return x**3 - 3.0 * x * y**2
+
+@njit(parallel=True, fastmath=True, cache=True)
+def bem_matvec(mu, nodes_x, nodes_y, elems, nx, ny, L, pts, wts):
+    N = len(mu)
+    out = np.zeros(N)
+
+    for i in prange(N):
+        row_val = 0.0
+        off_diag_sum = 0.0
+
+        for e in range(N):
+            j1 = elems[e, 0]
+            j2 = elems[e, 1]
+
+            if i == j1 or i == j2:
+                continue
+
+            val1 = 0.0
+            val2 = 0.0
+            for k in range(len(pts)):
+                xi = pts[k]
+                w = wts[k]
+
+                N1 = 0.5 * (1.0 - xi)
+                N2 = 0.5 * (1.0 + xi)
+
+                y_x = N1 * nodes_x[j1] + N2 * nodes_x[j2]
+                y_y = N1 * nodes_y[j1] + N2 * nodes_y[j2]
+
+                rx = nodes_x[i] - y_x
+                ry = nodes_y[i] - y_y
+                r2 = rx*rx + ry*ry
+
+                kernel = (rx * nx[e] + ry * ny[e]) / (2.0 * np.pi * r2)
+
+                val1 += kernel * N1 * w
+                val2 += kernel * N2 * w
+
+            val1 *= 0.5 * L[e]
+            val2 *= 0.5 * L[e]
+
+            row_val += val1 * mu[j1] + val2 * mu[j2]
+            off_diag_sum += val1 + val2  # Track the row sum for the trick
+
+        # Equipotential Trick: diag = -1.0 - sum(off_diagonals)
+        diag_term = -1.0 - off_diag_sum
+        out[i] = diag_term * mu[i] + row_val
+
+    return out
+
+@njit(parallel=True, fastmath=True, cache=True)
+def eval_interior(ix_pts, iy_pts, mu, nodes_x, nodes_y, elems, nx, ny, L, pts, wts):
+    M = len(ix_pts)
+    N = len(elems)
+    u_int = np.zeros(M)
+
+    for i in prange(M):
+        val = 0.0
+        x_pt = ix_pts[i]
+        y_pt = iy_pts[i]
+
+        for e in range(N):
+            j1 = elems[e, 0]
+            j2 = elems[e, 1]
+            for k in range(len(pts)):
+                xi = pts[k]
+                w = wts[k]
+
+                N1 = 0.5 * (1.0 - xi)
+                N2 = 0.5 * (1.0 + xi)
+
+                y_x = N1 * nodes_x[j1] + N2 * nodes_x[j2]
+                y_y = N1 * nodes_y[j1] + N2 * nodes_y[j2]
+
+                rx = x_pt - y_x
+                ry = y_pt - y_y
+                r2 = rx*rx + ry*ry
+
+                kernel = (rx * nx[e] + ry * ny[e]) / (2.0 * np.pi * r2)
+                mu_y = N1 * mu[j1] + N2 * mu[j2]
+                val += kernel * mu_y * w * 0.5 * L[e]
+
+        u_int[i] = val
+    return u_int
+
+class IterationCounter:
+    def __init__(self):
+        self.niter = 0
+    def __call__(self, pr_norm):
+        self.niter += 1
+
+def build_interior_grid():
+    ngrid = 60
+    _grid = np.linspace(-1.5, 1.5, ngrid)
+    gx, gy = np.meshgrid(_grid, _grid)
+
+    gx = gx.flatten()
+    gy = gy.flatten()
+
+    r_val = np.sqrt(gx**2 + gy**2)
+    theta_val = np.arctan2(gy, gx)
+    r_bound = r_func(theta_val)
+
+    mask = r_val < r_bound - 0.1
+
+    return gx[mask], gy[mask]
+
+def solve_bem(N):
+    t_start = time.time()
+
+    theta = np.linspace(0, 2*np.pi, N, endpoint=False)
+    r_nodes = r_func(theta)
+    nodes_x = r_nodes * np.cos(theta)
+    nodes_y = r_nodes * np.sin(theta)
+
+    elems = np.zeros((N, 2), dtype=np.int32)
+    nx = np.zeros(N)
+    ny = np.zeros(N)
+    L = np.zeros(N)
+
+    for i in range(N):
+        elems[i, 0] = i
+        elems[i, 1] = (i + 1) % N
+
+        x1 = nodes_x[elems[i, 0]]
+        y1 = nodes_y[elems[i, 0]]
+        x2 = nodes_x[elems[i, 1]]
+        y2 = nodes_y[elems[i, 1]]
+
+        dx = x2 - x1
+        dy = y2 - y1
+        L[i] = np.hypot(dx, dy)
+
+        nx[i] = dy / L[i]
+        ny[i] = -dx / L[i]
+
+    pts, wts = get_gauss_points()
+
+    f = np.zeros(N)
+    for i in range(N):
+        f[i] = exact_u(nodes_x[i], nodes_y[i])
+
+    t_setup = time.time() - t_start
+
+    t_solve_start = time.time()
+    def matvec(v):
+        return bem_matvec(v, nodes_x, nodes_y, elems, nx, ny, L, pts, wts)
+
+    LO = LinearOperator((N, N), matvec=matvec)
+    counter = IterationCounter()
+
+    sol, info = gmres(LO, f, callback=counter, rtol=1e-12, atol=1e-12, maxiter=N, callback_type='pr_norm')
+    t_solve = time.time() - t_solve_start
+
+    t_eval_start = time.time()
+    ix_pts, iy_pts = build_interior_grid()
+
+    u_interior = eval_interior(ix_pts, iy_pts, sol, nodes_x, nodes_y, elems, nx, ny, L, pts, wts)
+    u_exact_int = exact_u(ix_pts, iy_pts)
+
+    rel_l2 = np.linalg.norm(u_interior - u_exact_int) / np.linalg.norm(u_exact_int)
+    t_eval = time.time() - t_eval_start
+
+    return {
+        "N": N,
+        "Unknowns": N,
+        "GMRES": counter.niter,
+        "Error": rel_l2,
+        "Setup": t_setup,
+        "Solve": t_solve,
+        "Eval": t_eval,
+        "Total": t_setup + t_solve + t_eval
+    }
+
+if __name__ == "__main__":
+    _ = solve_bem(10)
+
+    N_values = [160, 320, 640, 1280, 2560, 5120]
+    results = []
+
+    print("N   Unknowns    GMRES    Rel L2 Error  Conv Rate     Setup     Solve      Eval     Total")
+    print("-" * 90)
+
+    for n in N_values:
+        res = solve_bem(n)
+        results.append(res)
+
+    for i, res in enumerate(results):
+        if i == 0:
+            rate_str = "      ---"
+        else:
+            prev = results[i-1]
+            rate = np.log(prev['Error'] / res['Error']) / np.log(res['N'] / prev['N'])
+            rate_str = f"{rate:9.2f}"
+
+        print(f"{res['N']:<3d} {res['Unknowns']:<11d} {res['GMRES']:<8d} {res['Error']:12.6e} {rate_str:13s} {res['Setup']:<9.3f} {res['Solve']:<9.3f} {res['Eval']:<9.3f} {res['Total']:<9.3f}")
+
+    if len(results) > 1:
+        log_h = np.log([1.0 / res['N'] for res in results])
+        log_err = np.log([res['Error'] for res in results])
+        A = np.vstack([log_h, np.ones(len(log_h))]).T
+        m, c = np.linalg.lstsq(A, log_err, rcond=None)[0]
+        print("-" * 90)
+        print(f"Final Convergence Order: {m:.2f}")
