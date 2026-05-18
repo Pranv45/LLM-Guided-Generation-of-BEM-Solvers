@@ -15,112 +15,111 @@ def q_exact(x, y, nx, ny):
     return ux * nx + uy * ny
 
 
-def naca_4digit_boundary(m, p, t, N_points):
-    N_points = int(N_points)
-    if N_points < 4:
-        raise ValueError("N_points must be at least 4")
+def camber_and_slope(x, m, p):
+    yc = np.zeros_like(x, dtype=np.float64)
+    dyc = np.zeros_like(x, dtype=np.float64)
 
-    n_upper = N_points // 2
-    n_lower = N_points - n_upper
+    left = x < p
+    right = ~left
 
-    s_upper = np.linspace(0.0, 1.0, n_upper + 1)
-    s_lower = np.linspace(0.0, 1.0, n_lower + 1)
+    if p > 0.0:
+        yc[left] = m / (p * p) * (2.0 * p * x[left] - x[left] ** 2)
+        dyc[left] = 2.0 * m / (p * p) * (p - x[left])
 
-    x_upper = 0.5 * (1.0 + np.cos(np.pi * s_upper))   # 1 -> 0
-    x_lower = 0.5 * (1.0 - np.cos(np.pi * s_lower))   # 0 -> 1
-
-    def camber(x):
-        yc = np.empty_like(x)
-        dyc = np.empty_like(x)
-
-        mask = x < p
-        if p > 0.0:
-            yc[mask] = m / (p * p) * (2.0 * p * x[mask] - x[mask] ** 2)
-            dyc[mask] = 2.0 * m / (p * p) * (p - x[mask])
-        else:
-            yc[mask] = 0.0
-            dyc[mask] = 0.0
-
-        mask2 = ~mask
-        if p < 1.0:
-            yc[mask2] = m / ((1.0 - p) ** 2) * (
-                (1.0 - 2.0 * p) + 2.0 * p * x[mask2] - x[mask2] ** 2
-            )
-            dyc[mask2] = 2.0 * m / ((1.0 - p) ** 2) * (p - x[mask2])
-        else:
-            yc[mask2] = 0.0
-            dyc[mask2] = 0.0
-
-        return yc, dyc
-
-    def thickness(x):
-        return 5.0 * t * (
-            0.2969 * np.sqrt(x)
-            - 0.1260 * x
-            - 0.3516 * x**2
-            + 0.2843 * x**3
-            - 0.1036 * x**4
+    if p < 1.0:
+        yc[right] = m / ((1.0 - p) ** 2) * (
+            (1.0 - 2.0 * p) + 2.0 * p * x[right] - x[right] ** 2
         )
+        dyc[right] = 2.0 * m / ((1.0 - p) ** 2) * (p - x[right])
 
-    yu, dyu = camber(x_upper)
-    yl, dyl = camber(x_lower)
-    tu = thickness(x_upper)
-    tl = thickness(x_lower)
+    return yc, dyc
 
-    th_u = np.arctan(dyu)
-    th_l = np.arctan(dyl)
 
-    upper = np.column_stack([x_upper - tu * np.sin(th_u), yu + tu * np.cos(th_u)])
-    lower = np.column_stack([x_lower + tl * np.sin(th_l), yl - tl * np.cos(th_l)])
+def thickness(x, t):
+    return 5.0 * t * (
+        0.2969 * np.sqrt(np.maximum(x, 0.0))
+        - 0.1260 * x
+        - 0.3516 * x**2
+        + 0.2843 * x**3
+        - 0.1036 * x**4
+    )
 
-    # TE upper -> LE -> TE lower, with exact TE closure
-    verts = np.vstack([upper, lower[1:]])
 
-    # Enforce CCW orientation
-    unique = verts[:-1]
-    x0 = unique[:, 0]
-    y0 = unique[:, 1]
-    x1 = np.roll(x0, -1)
-    y1 = np.roll(y0, -1)
-    area2 = np.sum(x0 * y1 - x1 * y0)
+def generate_naca4318_nodes(N):
+    N = int(N)
+    if N < 4:
+        raise ValueError("N must be at least 4")
+
+    m, p, t = 0.04, 0.3, 0.18
+
+    n_upper = N // 2 + 1
+    n_lower = N - n_upper + 1
+
+    s_upper = np.linspace(0.0, 1.0, n_upper)
+    s_lower = np.linspace(0.0, 1.0, n_lower)
+
+    x_upper = 0.5 * (1.0 + np.cos(np.pi * s_upper))  # TE -> LE
+    x_lower = 0.5 * (1.0 - np.cos(np.pi * s_lower))  # LE -> TE
+
+    yc_u, dyc_u = camber_and_slope(x_upper, m, p)
+    yc_l, dyc_l = camber_and_slope(x_lower, m, p)
+
+    yt_u = thickness(x_upper, t)
+    yt_l = thickness(x_lower, t)
+
+    th_u = np.arctan(dyc_u)
+    th_l = np.arctan(dyc_l)
+
+    upper = np.column_stack(
+        [x_upper - yt_u * np.sin(th_u), yc_u + yt_u * np.cos(th_u)]
+    )
+    lower = np.column_stack(
+        [x_lower + yt_l * np.sin(th_l), yc_l - yt_l * np.cos(th_l)]
+    )
+
+    nodes = np.vstack([upper, lower[1:]])  # double node at TE
+
+    x = nodes[:, 0]
+    y = nodes[:, 1]
+    area2 = np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
     if area2 < 0.0:
-        unique = unique[::-1].copy()
-        verts = np.vstack([unique, unique[:1]])
+        nodes = nodes[::-1].copy()
 
-    return verts
+    return nodes.astype(np.float64)
 
 
-def build_geometry(vertices):
-    p0 = vertices[:-1].copy()
-    p1 = vertices[1:].copy()
+def build_geometry(nodes):
+    N = nodes.shape[0]
+    elements = np.column_stack([np.arange(N - 1), np.arange(1, N)]).astype(np.int64)
 
-    ax = p0[:, 0]
-    ay = p0[:, 1]
-    bx = p1[:, 0]
-    by = p1[:, 1]
+    a = nodes[elements[:, 0]]
+    b = nodes[elements[:, 1]]
 
-    dx = bx - ax
-    dy = by - ay
-    L = np.sqrt(dx * dx + dy * dy)
-    if np.any(L <= 0.0):
+    dx = b[:, 0] - a[:, 0]
+    dy = b[:, 1] - a[:, 1]
+    lengths = np.sqrt(dx * dx + dy * dy)
+    if np.any(lengths <= 0.0):
         raise ValueError("Zero-length element encountered.")
 
-    cx = 0.5 * (ax + bx)
-    cy = 0.5 * (ay + by)
+    half = 0.5 * lengths
+    tx = dx / lengths
+    ty = dy / lengths
+    normals = np.column_stack([dy / lengths, -dx / lengths])
 
-    tx = dx / L
-    ty = dy / L
+    node_normals = np.zeros_like(nodes)
+    node_normals[0] = normals[0]
+    node_normals[-1] = normals[-1]
+    for i in range(1, N - 1):
+        v = normals[i - 1] + normals[i]
+        nv = np.linalg.norm(v)
+        if nv < 1e-14:
+            v = normals[i]
+            nv = np.linalg.norm(v)
+        node_normals[i] = v / nv
 
-    nx = dy / L
-    ny = -dx / L
+    node_bcs = (nodes[:, 0] < 0.8).astype(np.int8)  # 1 = Neumann, 0 = Dirichlet
 
-    half = 0.5 * L
-
-    return ax, ay, bx, by, cx, cy, L, half, tx, ty, nx, ny
-
-
-def classify_bcs(cx):
-    return (cx < 0.8).astype(np.int8)  # 1 = Neumann, 0 = Dirichlet
+    return elements, lengths, half, tx, ty, normals, node_normals, node_bcs
 
 
 def gauss_rule(order=8):
@@ -129,53 +128,88 @@ def gauss_rule(order=8):
 
 
 @njit(parallel=True)
-def assemble_HG(cx, cy, ax, ay, bx, by, half, tx, ty, nx, ny, L, xi, wi):
-    ne = cx.shape[0]
-    H = np.zeros((ne, ne), dtype=np.float64)
-    G = np.zeros((ne, ne), dtype=np.float64)
+def assemble_HG(nodes, elements, half, tx, ty, nx_e, ny_e, xi, wi):
+    N = nodes.shape[0]
+    Ne = elements.shape[0]
+    H = np.zeros((N, N), dtype=np.float64)
+    G = np.zeros((N, N), dtype=np.float64)
 
-    for i in prange(ne):
-        H[i, i] = 0.5
-        G[i, i] = (L[i] / (2.0 * np.pi)) * (1.0 - np.log(L[i] / 2.0))
+    nq = xi.shape[0]
 
-        xcol = cx[i]
-        ycol = cy[i]
+    for i in prange(N):
+        xcol = nodes[i, 0]
+        ycol = nodes[i, 1]
 
-        for j in range(ne):
-            if j == i:
+        for e in range(Ne):
+            a = elements[e, 0]
+            b = elements[e, 1]
+            L = 2.0 * half[e]
+
+            if i == a or i == b:
+                logL = np.log(L)
+                coeff = -L / (4.0 * np.pi)
+                if i == a:
+                    G[i, a] += coeff * (logL - 1.5)
+                    G[i, b] += coeff * (logL - 0.5)
+                else:
+                    G[i, a] += coeff * (logL - 0.5)
+                    G[i, b] += coeff * (logL - 1.5)
                 continue
 
-            h = 0.0
-            g = 0.0
+            ga = 0.0
+            gb = 0.0
+            ha = 0.0
+            hb = 0.0
 
-            for k in range(xi.shape[0]):
+            ax = nodes[a, 0]
+            ay = nodes[a, 1]
+            bx = nodes[b, 0]
+            by = nodes[b, 1]
+
+            for k in range(nq):
                 s = xi[k]
                 w = wi[k]
 
-                px = cx[j] + half[j] * s * tx[j]
-                py = cy[j] + half[j] * s * ty[j]
+                phi1 = 0.5 * (1.0 - s)
+                phi2 = 0.5 * (1.0 + s)
+
+                px = ax * phi1 + bx * phi2
+                py = ay * phi1 + by * phi2
 
                 rx = xcol - px
                 ry = ycol - py
                 r2 = rx * rx + ry * ry
+                r = np.sqrt(r2)
 
-                log_r = 0.5 * np.log(r2)
-                ustar = -(1.0 / (2.0 * np.pi)) * log_r
-                qstar = (1.0 / (2.0 * np.pi)) * ((rx * nx[j] + ry * ny[j]) / r2)
+                ustar = -(1.0 / (2.0 * np.pi)) * np.log(r)
+                qstar = (1.0 / (2.0 * np.pi)) * ((rx * nx_e[e] + ry * ny_e[e]) / r2)
 
-                g += w * ustar
-                h += w * qstar
+                wt = half[e] * w
+                ga += wt * ustar * phi1
+                gb += wt * ustar * phi2
+                ha += wt * qstar * phi1
+                hb += wt * qstar * phi2
 
-            G[i, j] = half[j] * g
-            H[i, j] = half[j] * h
+            G[i, a] += ga
+            G[i, b] += gb
+            H[i, a] += ha
+            H[i, b] += hb
+
+    for i in prange(N):
+        s = 0.0
+        for j in range(N):
+            if j != i:
+                s += H[i, j]
+        H[i, i] = -s
 
     return H, G
 
 
 @njit(parallel=True)
-def evaluate_interior(points, cx, cy, half, tx, ty, nx, ny, L, u_bnd, q_bnd, xi, wi):
+def evaluate_interior(points, nodes, elements, half, nx_e, ny_e, u_nodes, q_nodes, xi, wi):
     npnt = points.shape[0]
-    ne = cx.shape[0]
+    Ne = elements.shape[0]
+    nq = xi.shape[0]
     out = np.zeros(npnt, dtype=np.float64)
 
     for p in prange(npnt):
@@ -183,29 +217,45 @@ def evaluate_interior(points, cx, cy, half, tx, ty, nx, ny, L, u_bnd, q_bnd, xi,
         y = points[p, 1]
         val = 0.0
 
-        for j in range(ne):
-            int_u = 0.0
-            int_q = 0.0
+        for e in range(Ne):
+            a = elements[e, 0]
+            b = elements[e, 1]
 
-            for k in range(xi.shape[0]):
+            ax = nodes[a, 0]
+            ay = nodes[a, 1]
+            bx = nodes[b, 0]
+            by = nodes[b, 1]
+
+            ua = u_nodes[a]
+            ub = u_nodes[b]
+            qa = q_nodes[a]
+            qb = q_nodes[b]
+
+            integ = 0.0
+            for k in range(nq):
                 s = xi[k]
                 w = wi[k]
 
-                px = cx[j] + half[j] * s * tx[j]
-                py = cy[j] + half[j] * s * ty[j]
+                phi1 = 0.5 * (1.0 - s)
+                phi2 = 0.5 * (1.0 + s)
+
+                px = ax * phi1 + bx * phi2
+                py = ay * phi1 + by * phi2
 
                 rx = x - px
                 ry = y - py
                 r2 = rx * rx + ry * ry
+                r = np.sqrt(r2)
 
-                log_r = 0.5 * np.log(r2)
-                ustar = -(1.0 / (2.0 * np.pi)) * log_r
-                qstar = (1.0 / (2.0 * np.pi)) * ((rx * nx[j] + ry * ny[j]) / r2)
+                ustar = -(1.0 / (2.0 * np.pi)) * np.log(r)
+                qstar = (1.0 / (2.0 * np.pi)) * ((rx * nx_e[e] + ry * ny_e[e]) / r2)
 
-                int_u += w * ustar * q_bnd[j]
-                int_q += w * qstar * u_bnd[j]
+                uval = ua * phi1 + ub * phi2
+                qval = qa * phi1 + qb * phi2
 
-            val += half[j] * (int_u - int_q)
+                integ += w * (ustar * qval - qstar * uval)
+
+            val += half[e] * integ
 
         out[p] = val
 
@@ -230,8 +280,7 @@ def point_in_polygon(points, poly):
             xi = poly[k, 0]
             yi = poly[k, 1]
 
-            cond = ((yi > y) != (yj > y))
-            if cond:
+            if ((yi > y) != (yj > y)):
                 xint = (xj - xi) * (y - yi) / (yj - yi + 1e-300) + xi
                 if x < xint:
                     c = not c
@@ -255,27 +304,32 @@ def min_dist_to_segments(points, ax, ay, bx, by):
         py = points[i, 1]
         dmin = 1e300
 
-        for j in range(ne):
-            vx = bx[j] - ax[j]
-            vy = by[j] - ay[j]
-            wx = px - ax[j]
-            wy = py - ay[j]
+        for e in range(ne):
+            x1 = ax[e]
+            y1 = ay[e]
+            x2 = bx[e]
+            y2 = by[e]
+
+            vx = x2 - x1
+            vy = y2 - y1
+            wx = px - x1
+            wy = py - y1
 
             c1 = wx * vx + wy * vy
             if c1 <= 0.0:
-                dx = px - ax[j]
-                dy = py - ay[j]
+                dx = px - x1
+                dy = py - y1
                 d = np.sqrt(dx * dx + dy * dy)
             else:
                 c2 = vx * vx + vy * vy
                 if c1 >= c2:
-                    dx = px - bx[j]
-                    dy = py - by[j]
+                    dx = px - x2
+                    dy = py - y2
                     d = np.sqrt(dx * dx + dy * dy)
                 else:
                     b = c1 / c2
-                    projx = ax[j] + b * vx
-                    projy = ay[j] + b * vy
+                    projx = x1 + b * vx
+                    projy = y1 + b * vy
                     dx = px - projx
                     dy = py - projy
                     d = np.sqrt(dx * dx + dy * dy)
@@ -289,87 +343,94 @@ def min_dist_to_segments(points, ax, ay, bx, by):
 
 
 def warm_up_numba():
+    nodes = np.array(
+        [[1.0, 0.0], [0.5, 0.0], [0.0, 0.0], [1.0, 0.0]], dtype=np.float64
+    )
+    elements = np.array([[0, 1], [1, 2], [2, 3]], dtype=np.int64)
+    half = np.array([0.25, 0.25, 0.5], dtype=np.float64)
+    tx = np.array([-1.0, -1.0, 1.0], dtype=np.float64)
+    ty = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    nx_e = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    ny_e = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    xi, wi = gauss_rule(4)
+
+    _ = assemble_HG(nodes, elements, half, tx, ty, nx_e, ny_e, xi, wi)
+
+    pts = np.array([[0.2, 0.1]], dtype=np.float64)
+    poly = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+    _ = point_in_polygon(pts, poly)
+
     ax = np.array([0.0, 1.0], dtype=np.float64)
     ay = np.array([0.0, 0.0], dtype=np.float64)
     bx = np.array([1.0, 1.0], dtype=np.float64)
     by = np.array([0.0, 1.0], dtype=np.float64)
-    cx = 0.5 * (ax + bx)
-    cy = 0.5 * (ay + by)
-    dx = bx - ax
-    dy = by - ay
-    L = np.sqrt(dx * dx + dy * dy)
-    half = 0.5 * L
-    tx = dx / L
-    ty = dy / L
-    nx = dy / L
-    ny = -dx / L
-    xi, wi = gauss_rule(4)
-
-    _ = assemble_HG(cx, cy, ax, ay, bx, by, half, tx, ty, nx, ny, L, xi, wi)
-
-    pts = np.array([[0.25, 0.25]], dtype=np.float64)
-    poly = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
-    _ = point_in_polygon(pts, poly)
     _ = min_dist_to_segments(pts, ax, ay, bx, by)
 
-    u_bnd = np.array([1.0, 1.0], dtype=np.float64)
-    q_bnd = np.array([0.0, 0.0], dtype=np.float64)
-    _ = evaluate_interior(pts, cx, cy, half, tx, ty, nx, ny, L, u_bnd, q_bnd, xi, wi)
+    u_nodes = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float64)
+    q_nodes = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    _ = evaluate_interior(pts, nodes, elements, half, nx_e, ny_e, u_nodes, q_nodes, xi, wi)
 
 
-def run_case(N_points, xi, wi, grid_n=200, N_values_ref=(100, 200, 400, 800)):
+def run_case(N, xi, wi, grid_n=200, N_values_ref=(100, 200, 400, 800)):
     t0 = time.perf_counter()
 
-    vertices = naca_4digit_boundary(0.04, 0.3, 0.18, N_points)
-    ax, ay, bx, by, cx, cy, L, half, tx, ty, nx, ny = build_geometry(vertices)
-    bcs_type = classify_bcs(cx)
+    # ── Geometry + Assembly ─────────────────────────────
+    nodes = generate_naca4318_nodes(N)
+    elements, lengths, half, tx, ty, normals, node_normals, node_bcs = build_geometry(nodes)
 
-    u_known = u_exact(cx, cy)
-    q_known = q_exact(cx, cy, nx, ny)
+    u_known = u_exact(nodes[:, 0], nodes[:, 1])
+    q_known = q_exact(nodes[:, 0], nodes[:, 1], node_normals[:, 0], node_normals[:, 1])
 
-    H, G = assemble_HG(cx, cy, ax, ay, bx, by, half, tx, ty, nx, ny, L, xi, wi)
+    H, G = assemble_HG(nodes, elements, half, tx, ty, normals[:, 0], normals[:, 1], xi, wi)
 
+    t1 = time.perf_counter()
+
+    # ── Linear Solve ────────────────────────────────────
     A = np.empty_like(H)
-    b = np.zeros(N_points, dtype=np.float64)
+    b = np.zeros(N, dtype=np.float64)
 
-    for j in range(N_points):
-        if bcs_type[j] == 0:
+    for j in range(N):
+        if node_bcs[j] == 0:
             A[:, j] = -G[:, j]
             b -= H[:, j] * u_known[j]
         else:
             A[:, j] = H[:, j]
             b += G[:, j] * q_known[j]
 
-    t1 = time.perf_counter()
-
     xsol = np.linalg.solve(A, b)
 
     t2 = time.perf_counter()
 
-    u_bnd = np.where(bcs_type == 0, u_known, xsol)
-    q_bnd = np.where(bcs_type == 1, q_known, xsol)
+    # ── Interior Evaluation ─────────────────────────────
+    u_nodes = np.where(node_bcs == 0, u_known, xsol)
+    q_nodes = np.where(node_bcs == 1, q_known, xsol)
 
     xs = np.linspace(-0.1, 1.1, grid_n)
     ys = np.linspace(-0.2, 0.2, grid_n)
     XX, YY = np.meshgrid(xs, ys)
     all_pts = np.column_stack([XX.ravel(), YY.ravel()])
 
-    poly = vertices[:-1].copy()
-    interior = point_in_polygon(all_pts, poly)
+    interior = point_in_polygon(all_pts, nodes)
     interior_pts = all_pts[interior]
 
     N_min = min(N_values_ref)
-    perimeter = np.sum(L)
+    perimeter = np.sum(lengths)
     h_coarse = perimeter / N_min
     delta = 2.0 * h_coarse
+
+    ax = nodes[elements[:, 0], 0]
+    ay = nodes[elements[:, 0], 1]
+    bx = nodes[elements[:, 1], 0]
+    by = nodes[elements[:, 1], 1]
 
     dist = min_dist_to_segments(interior_pts, ax, ay, bx, by)
     grid_pts = interior_pts[dist > delta]
 
-    if grid_pts.shape[0] == 0:
-        raise RuntimeError("No interior evaluation points remain after boundary exclusion.")
-
-    u_num = evaluate_interior(grid_pts, cx, cy, half, tx, ty, nx, ny, L, u_bnd, q_bnd, xi, wi)
+    u_num = evaluate_interior(
+        grid_pts, nodes, elements, half,
+        normals[:, 0], normals[:, 1],
+        u_nodes, q_nodes, xi, wi
+    )
     u_ex = u_exact(grid_pts[:, 0], grid_pts[:, 1])
 
     rel_l2 = np.linalg.norm(u_num - u_ex) / np.linalg.norm(u_ex)
@@ -377,12 +438,12 @@ def run_case(N_points, xi, wi, grid_n=200, N_values_ref=(100, 200, 400, 800)):
     t3 = time.perf_counter()
 
     return {
-        "N": N_points,
-        "unknowns": N_points,
+        "N": N,
+        "unknowns": N,
         "rel_l2": rel_l2,
-        "setup_assembly": t1 - t0,
+        "assembly": t1 - t0,
         "solve": t2 - t1,
-        "eval": t3 - t2,
+        "evaluation": t3 - t2,
         "total": t3 - t0,
     }
 
@@ -401,16 +462,13 @@ def main():
     errs = np.array([r["rel_l2"] for r in results], dtype=np.float64)
     slope, _ = np.polyfit(np.log(hs), np.log(errs), 1)
 
-    print("N      Unknowns    Rel_L2_Error        Setup+Assemble(s)   Solve(s)      Eval(s)       Total(s)")
+    print("N      Unknowns   Rel_L2_Error        Assembly(s)   Solve(s)   Eval(s)   Total(s)")
     for r in results:
         print(
-            f'{r["N"]:<6d} {r["unknowns"]:<10d} {r["rel_l2"]:>14.6e}   '
-            f'{r["setup_assembly"]:>14.6f}   {r["solve"]:>9.6f}   '
-            f'{r["eval"]:>9.6f}   {r["total"]:>9.6f}'
+            f"{r['N']:<6d} {r['unknowns']:<10d} {r['rel_l2']:>14.6e}   "
+            f"{r['assembly']:>10.6f}   {r['solve']:>8.6f}   "
+            f"{r['evaluation']:>8.6f}   {r['total']:>9.6f}"
         )
-
     print(f"Estimated convergence order = {slope:.6f}")
-
-
 if __name__ == "__main__":
-    main()
+        main()
